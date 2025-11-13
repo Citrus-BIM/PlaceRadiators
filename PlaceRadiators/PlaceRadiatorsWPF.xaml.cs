@@ -128,10 +128,7 @@ namespace PlaceRadiators
             FamilySymbol selectedRadiatorFamilyType = comboBox_RadiatorTypeSelection.SelectedItem as FamilySymbol;
             if (selectedRadiatorFamilyType != null)
             {
-                RadiatorWidthByButtonName = (this.groupBox_RadiatorWidthBy.Content as System.Windows.Controls.Grid)
-                    .Children.OfType<RadioButton>()
-                    .FirstOrDefault(rb => rb.IsChecked.Value == true)
-                    .Name;
+                RadiatorWidthByButtonName = GetWidthBySelection();
 
                 if (RadiatorWidthByButtonName == "radioButton_Type")
                 {
@@ -254,10 +251,7 @@ namespace PlaceRadiators
 
         private void radioButton_RadiatorWidthBy_Checked(object sender, RoutedEventArgs e)
         {
-            RadiatorWidthByButtonName = (this.groupBox_RadiatorWidthBy.Content as System.Windows.Controls.Grid)
-                .Children.OfType<RadioButton>()
-                .FirstOrDefault(rb => rb.IsChecked.Value == true)
-                .Name;
+            RadiatorWidthByButtonName = GetWidthBySelection();
 
             if (RadiatorWidthByButtonName == "radioButton_Type")
             {
@@ -367,7 +361,12 @@ namespace PlaceRadiators
                 }
             }
         }
-
+        private string GetWidthBySelection()
+        {
+            return (radioButton_Type?.IsChecked == true)
+                ? "radioButton_Type"
+                : "radioButton_Instance";
+        }
         private void SaveSettings()
         {
             PlaceRadiatorsSettingsItem = new PlaceRadiatorsSettings();
@@ -380,10 +379,7 @@ namespace PlaceRadiators
             SelectedRadiatorType = comboBox_RadiatorTypeSelection.SelectedItem as FamilySymbol;
             PlaceRadiatorsSettingsItem.SelectedRadiatorTypeName = SelectedRadiatorType.Name;
 
-            RadiatorWidthByButtonName = (this.groupBox_RadiatorWidthBy.Content as System.Windows.Controls.Grid)
-                .Children.OfType<RadioButton>()
-                .FirstOrDefault(rb => rb.IsChecked.Value == true)
-                .Name;
+            RadiatorWidthByButtonName = GetWidthBySelection();
             PlaceRadiatorsSettingsItem.RadiatorWidthByButtonName = RadiatorWidthByButtonName;
 
             SelectedRadiatorWidthParameter = comboBox_RadiatorWidthParameter.SelectedItem as Definition;

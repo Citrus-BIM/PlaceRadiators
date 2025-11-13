@@ -1,4 +1,6 @@
-﻿using Autodesk.Revit.DB;
+﻿using Autodesk.Revit.Attributes;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.Structure;
 using Autodesk.Revit.UI;
 using Autodesk.Revit.UI.Selection;
 using System;
@@ -10,299 +12,348 @@ using System.Threading.Tasks;
 
 namespace PlaceRadiators
 {
-    [Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
-    class PlaceRadiatorsCommand : IExternalCommand
+    [Transaction(TransactionMode.Manual)]
+    internal class PlaceRadiatorsCommand : IExternalCommand
     {
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
+            try { _ = GetPluginStartInfo(); } catch { }
+
+            var uiDoc = commandData.Application.ActiveUIDocument;
+            var doc = uiDoc.Document;
+            var sel = uiDoc.Selection;
+
+            // 1) Выбираем окна в связях (каждый пик -> окно + ссылка на RevitLinkInstance)
+            List<LinkedWindowPick> picked;
             try
             {
-                _ = GetPluginStartInfo();
-            }
-            catch { }
+                var refs = sel.PickObjects(
+                    ObjectType.LinkedElement,
+                    new WindowsOnlyInLinksFilter(doc),
+                    "Выберите окна в связанных файлах"
+                );
 
-            Document doc = commandData.Application.ActiveUIDocument.Document;
-            Document linkDoc = null;
-            Selection sel = commandData.Application.ActiveUIDocument.Selection;
+                picked = refs.Select(r =>
+                {
+                    var li = doc.GetElement(r.ElementId) as RevitLinkInstance;
+                    var ld = li?.GetLinkDocument();
+                    var fi = ld?.GetElement(r.LinkedElementId) as FamilyInstance;
+                    var tr = li?.GetTotalTransform(); // ← добавь это
 
-            //Выбор связанного файла
-            RevitLinkInstanceSelectionFilter selFilterRevitLinkInstance = new RevitLinkInstanceSelectionFilter();
-            Reference selRevitLinkInstance = null;
-            try
-            {
-                selRevitLinkInstance = sel.PickObject(ObjectType.Element, selFilterRevitLinkInstance, "Выберите связанный файл!");
+                    return new LinkedWindowPick
+                    {
+                        Link = li,
+                        LinkDoc = ld,
+                        Window = fi,
+                        Transform = tr      // ← и это
+                    };
+                })
+                .Where(x => x.Link != null && x.LinkDoc != null && x.Window != null && x.Transform != null)
+                .GroupBy(x => (Link: x.Link.Id.IntegerValue, Elem: x.Window.Id.IntegerValue))
+                .Select(g => g.First())
+                .ToList();
             }
             catch (Autodesk.Revit.Exceptions.OperationCanceledException)
             {
                 return Result.Cancelled;
             }
 
-            IEnumerable<RevitLinkInstance> revitLinkInstance = new FilteredElementCollector(doc)
-                .OfClass(typeof(RevitLinkInstance))
-                .Where(li => li.Id == selRevitLinkInstance.ElementId)
-                .Cast<RevitLinkInstance>();
-            if (revitLinkInstance.Count() == 0)
+            if (picked.Count == 0)
             {
-                TaskDialog.Show("Ravit", "Связанный файл не найден!");
-                return Result.Cancelled;
-            }
-            linkDoc = revitLinkInstance.First().GetLinkDocument();
-            Transform transform = revitLinkInstance.First().GetTransform();
-
-            List<FamilyInstance> windowList = new List<FamilyInstance>();
-            WindowInLinkSelectionFilter<FamilyInstance> selFilter = new WindowInLinkSelectionFilter<FamilyInstance>(doc);
-
-            IList<Reference> selWindows = null;
-            try
-            {
-                selWindows = sel.PickObjects(ObjectType.LinkedElement, selFilter, "Выберите окна!");
-            }
-            catch (Autodesk.Revit.Exceptions.OperationCanceledException)
-            {
+                TaskDialog.Show("Revit", "Окна не выбраны.");
                 return Result.Cancelled;
             }
 
-            foreach (Reference windowRef in selWindows)
+            // 2) Сервисные коллекции
+            var hostLevels = new FilteredElementCollector(doc)
+                .OfCategory(BuiltInCategory.OST_Levels)
+                .WhereElementIsNotElementType()
+                .Cast<Level>()
+                .ToList();
+
+            // параметры типа ОКНА (берем из первого выбранного окна в его linkDoc)
+            var firstWindowTypeParams = picked.First().Window.Symbol.Parameters
+                .Cast<Parameter>()
+                .Where(p => p.StorageType == StorageType.Double)
+                .OrderBy(p => p.Definition.Name, new AlphanumComparatorFastString())
+                .ToList();
+
+            // Семейства МЭО — напрямую по Family (быстро)
+            var mechanicalFamilies = new FilteredElementCollector(doc)
+                .OfClass(typeof(Family))
+                .Cast<Family>()
+                .Where(f => f.FamilyCategory?.Id.IntegerValue == (int)BuiltInCategory.OST_MechanicalEquipment)
+                .OrderBy(f => f.Name, new AlphanumComparatorFastString())
+                .ToList();
+
+            // 3) UI
+            var dlg = new PlaceRadiatorsWPF(doc, firstWindowTypeParams, mechanicalFamilies);
+            dlg.ShowDialog();
+            if (dlg.DialogResult != true) return Result.Cancelled;
+
+            var windowWidthParam = dlg.SelectedWindowWidthParameter; // параметр ширины окна (типовой)
+            var radiatorBaseType = dlg.SelectedRadiatorType;         // выбранный тип радиатора
+            var radiatorWidthDef = dlg.SelectedRadiatorWidthParameter;
+            var byType = dlg.RadiatorWidthByButtonName == "radioButton_Type";
+            var radiatorThicknessDef = dlg.SelectedRadiatorThicknessParameter;
+
+            int percent = 50;
+            int.TryParse(dlg.PercentageLength, out percent);
+            if (percent <= 0) percent = 50;
+
+            double indentFromLevelFt = MmToFt(double.TryParse(dlg.IndentFromLevel, out var mm1) ? mm1 : 100);
+            double indentFromWallFt = MmToFt(double.TryParse(dlg.IndentFromWall, out var mm2) ? mm2 : 100);
+
+            // 4) Размещение
+            var activated = new HashSet<ElementId>();
+
+            using (var tg = new TransactionGroup(doc, "Расставить радиаторы"))
             {
-                windowList.Add(linkDoc.GetElement(windowRef.LinkedElementId) as FamilyInstance);
-            }
+                tg.Start();
 
-            if (windowList.Count != 0)
-            {
-                List<Level> docLvlList = new FilteredElementCollector(doc)
-                    .OfCategory(BuiltInCategory.OST_Levels)
-                    .WhereElementIsNotElementType()
-                    .Cast<Level>()
-                    .ToList();
-
-                List<Parameter> windowParameterList = new List<Parameter>();
-                ParameterSet windowTypeParameterSet = windowList.First().Symbol.Parameters;
-                foreach (Parameter parameter in windowTypeParameterSet)
+                using (var t = new Transaction(doc, "Создание радиаторов"))
                 {
-                    windowParameterList.Add(parameter);
-                }
-                windowParameterList = windowParameterList
-                    .Where(p => p.StorageType == StorageType.Double)
-                    .OrderBy(p => p.Definition.Name, new AlphanumComparatorFastString()).ToList();
+                    t.Start();
 
-                List<Family> mechanicalEquipmentList = new List<Family>();
-                List<Family> tmpMechanicalEquipmentList = new FilteredElementCollector(doc)
-                    .OfCategory(BuiltInCategory.OST_MechanicalEquipment)
-                    .WhereElementIsElementType()
-                    .Cast<FamilySymbol>()
-                    .Select(fs => doc.GetElement(fs.Family.Id) as Family)
-                    .OrderBy(f => f.Name, new AlphanumComparatorFastString())
-                    .Distinct()
-                    .ToList();
-                foreach (Family family in tmpMechanicalEquipmentList)
-                {
-                    if (mechanicalEquipmentList.FirstOrDefault(me => me.Id == family.Id) == null)
+                    foreach (var pick in picked)
                     {
-                        mechanicalEquipmentList.Add(family);
-                    }
-                }
+                        var window = pick.Window;
+                        var linkDoc = pick.LinkDoc;
+                        var transform = pick.Transform;
 
-                PlaceRadiatorsWPF placeRadiatorsWPF = new PlaceRadiatorsWPF(doc, windowParameterList, mechanicalEquipmentList);
-                placeRadiatorsWPF.ShowDialog();
-                if (placeRadiatorsWPF.DialogResult != true)
-                {
-                    return Result.Cancelled;
-                }
+                        // длина радиатора = ширина окна (тип) * %
+                        double baseW = window.Symbol.get_Parameter(windowWidthParam.Definition).AsDouble();
+                        double targetLen = RoundUpToIncrementMmFeet(baseW * percent / 100.0, 100); // шаг 100 мм
 
-                Parameter windowWidthParameter = placeRadiatorsWPF.SelectedWindowWidthParameter;
-                FamilySymbol radiatorType = placeRadiatorsWPF.SelectedRadiatorType;
-                Definition radiatorWidthParameterDefinition = placeRadiatorsWPF.SelectedRadiatorWidthParameter;
-                string radiatorWidthByButtonName = placeRadiatorsWPF.RadiatorWidthByButtonName;
-                Definition radiatorThicknessParameter = placeRadiatorsWPF.SelectedRadiatorThicknessParameter;
+                        // подбираем/создаём тип
+                        FamilySymbol useType = radiatorBaseType;
 
-                int percentageLength = 50;
-                int.TryParse(placeRadiatorsWPF.PercentageLength, out percentageLength);
-                if (percentageLength == 0)
-                {
-                    percentageLength = 50;
-                }
-
-                double indentFromLevel = 0;
-                double.TryParse(placeRadiatorsWPF.IndentFromLevel, out indentFromLevel);
-                indentFromLevel = indentFromLevel / 304.8;
-
-                double indentFromWall = 0;
-                double.TryParse(placeRadiatorsWPF.IndentFromWall, out indentFromWall);
-                indentFromWall = indentFromWall / 304.8;
-
-                using (TransactionGroup tg = new TransactionGroup(doc))
-                {
-                    tg.Start("Расставить радиаторы");
-                    if (radiatorWidthByButtonName == "radioButton_Type")
-                    {
-                        foreach (FamilyInstance window in windowList)
+                        if (byType)
                         {
-                            double windowWidth = Math.Round(window.Symbol.get_Parameter(windowWidthParameter.Definition).AsDouble(), 6);
-                            windowWidth = RoundUpToIncrement(windowWidth * percentageLength / 100, 100);
-
-
-                            FamilySymbol targetRadiatorType = new FilteredElementCollector(doc)
+                            var found = new FilteredElementCollector(doc)
                                 .OfCategory(BuiltInCategory.OST_MechanicalEquipment)
                                 .WhereElementIsElementType()
                                 .Cast<FamilySymbol>()
-                                .Where(fs => fs.Family.Id == radiatorType.Family.Id)
-                                .Where(fs => Math.Round(fs.get_Parameter(radiatorThicknessParameter).AsDouble(), 6)
-                                == Math.Round(radiatorType.get_Parameter(radiatorThicknessParameter).AsDouble(), 6))
-                                .FirstOrDefault(fs => Math.Round(fs.get_Parameter(radiatorWidthParameterDefinition).AsDouble(), 6) == Math.Round(windowWidth, 6));
-                            if (targetRadiatorType == null)
-                            {
-                                using (Transaction t = new Transaction(doc))
+                                .Where(fs => fs.Family.Id == radiatorBaseType.Family.Id)
+                                .Where(fs =>
                                 {
-                                    t.Start("Новый тип радиатора");
-                                    targetRadiatorType = radiatorType.Duplicate($"{radiatorType.Name} L={Math.Round(windowWidth * 304.8)}") as FamilySymbol;
-                                    targetRadiatorType.get_Parameter(radiatorWidthParameterDefinition).Set(windowWidth);
-                                    t.Commit();
-                                }
+                                    var pT = fs.get_Parameter(radiatorThicknessDef);
+                                    var pL = fs.get_Parameter(radiatorWidthDef);
+                                    if (pT == null || pL == null) return false;
+
+                                    double baseT = radiatorBaseType.get_Parameter(radiatorThicknessDef).AsDouble();
+                                    return Almost(pT.AsDouble(), baseT) && Almost(pL.AsDouble(), targetLen);
+                                })
+                                .FirstOrDefault();
+
+                            if (found == null)
+                            {
+                                var name = $"{radiatorBaseType.Name} L={Math.Round(FtToMm(targetLen))}";
+                                useType = (FamilySymbol)radiatorBaseType.Duplicate(name);
+                                useType.get_Parameter(radiatorWidthDef).Set(targetLen);
                             }
-
-                            using (Transaction t = new Transaction(doc))
+                            else
                             {
-                                t.Start("Установка радиатора");
-                                targetRadiatorType.Activate();
-
-                                XYZ windowLocation = transform.OfPoint((window.Location as LocationPoint).Point);
-                                Level closestRadiatorLevel = GetClosestRoomLevel(docLvlList, linkDoc, window);
-                                XYZ radiatorLocation = new XYZ(windowLocation.X, windowLocation.Y, indentFromLevel); ;
-
-                                FamilyInstance newRadiator = doc.Create.NewFamilyInstance(radiatorLocation, targetRadiatorType, closestRadiatorLevel, Autodesk.Revit.DB.Structure.StructuralType.NonStructural);
-
-                                XYZ newRadiatorFacingOrientation = newRadiator.FacingOrientation;
-                                XYZ windowFacingOrientation = transform.OfVector(window.FacingOrientation);
-                                double angle = Math.Round(newRadiatorFacingOrientation.AngleTo(windowFacingOrientation), 6);
-                                Line axis = Line.CreateBound(radiatorLocation, radiatorLocation + 1 * XYZ.BasisZ);
-                                if (angle != 0)
-                                {
-                                    ElementTransformUtils.RotateElement(doc, newRadiator.Id, axis, -angle);
-                                }
-
-                                double hostWallWidth = 0;
-                                Wall hostWall = linkDoc.GetElement(window.Host.Id) as Wall;
-                                if (hostWall != null)
-                                {
-                                    hostWallWidth = hostWall.Width;
-                                }
-                                ElementTransformUtils.MoveElement(doc, newRadiator.Id, (hostWallWidth / 2 + indentFromWall) * windowFacingOrientation.Negate());
-                                t.Commit();
+                                useType = found;
                             }
                         }
-                    }
-                    else
-                    {
-                        foreach (FamilyInstance window in windowList)
+
+                        if (!activated.Contains(useType.Id))
                         {
-                            double windowWidth = Math.Round(window.Symbol.get_Parameter(windowWidthParameter.Definition).AsDouble(), 6);
-                            windowWidth = RoundUpToIncrement(windowWidth * percentageLength / 100, 100);
-
-                            using (Transaction t = new Transaction(doc))
-                            {
-                                t.Start("Установка радиатора");
-                                radiatorType.Activate();
-
-                                XYZ windowLocation = transform.OfPoint((window.Location as LocationPoint).Point);
-                                Level closestRadiatorLevel = GetClosestRoomLevel(docLvlList, linkDoc, window);
-                                XYZ radiatorLocation = new XYZ(windowLocation.X, windowLocation.Y, indentFromLevel);
-
-                                FamilyInstance newRadiator = doc.Create.NewFamilyInstance(radiatorLocation, radiatorType, closestRadiatorLevel, Autodesk.Revit.DB.Structure.StructuralType.NonStructural);
-                                if (newRadiator.LookupParameter(radiatorWidthParameterDefinition.Name) != null)
-                                {
-                                    if (!newRadiator.LookupParameter(radiatorWidthParameterDefinition.Name).IsReadOnly)
-                                    {
-                                        newRadiator.LookupParameter(radiatorWidthParameterDefinition.Name).Set(windowWidth);
-                                    }
-                                    else
-                                    {
-                                        TaskDialog.Show("Revit", $"Параметр \"{radiatorWidthParameterDefinition.Name}\" доступен только для чтения!");
-                                        return Result.Cancelled;
-                                    }
-                                }
-
-                                XYZ newRadiatorFacingOrientation = newRadiator.FacingOrientation;
-                                XYZ windowFacingOrientation = transform.OfVector(window.FacingOrientation);
-                                double angle = Math.Round(newRadiatorFacingOrientation.AngleTo(windowFacingOrientation), 6);
-                                Line axis = Line.CreateBound(radiatorLocation, radiatorLocation + 1 * XYZ.BasisZ);
-                                if (angle != 0)
-                                {
-                                    ElementTransformUtils.RotateElement(doc, newRadiator.Id, axis, -angle);
-                                }
-
-                                double hostWallWidth = 0;
-                                Wall hostWall = linkDoc.GetElement(window.Host.Id) as Wall;
-                                if (hostWall != null)
-                                {
-                                    hostWallWidth = hostWall.Width;
-                                }
-                                ElementTransformUtils.MoveElement(doc, newRadiator.Id, (hostWallWidth / 2 + indentFromWall) * windowFacingOrientation.Negate());
-                                t.Commit();
-                            }
+                            useType.Activate();
+                            activated.Add(useType.Id);
                         }
+
+                        // координаты окна -> в систему хоста
+                        XYZ winPtHost = transform.OfPoint((window.Location as LocationPoint).Point);
+
+                        // целевой фасинг
+                        bool invert = false;
+                        XYZ targetFacing = TargetFacingByWindow(window, transform, invert);
+
+                        // ближайший уровень хоста
+                        Level hostLevel = GetClosestHostLevel(hostLevels, linkDoc, window, transform);
+                        if (hostLevel == null) continue;
+
+                        // итоговая точка: Z = уровень + отступ
+                        XYZ place = new XYZ(winPtHost.X, winPtHost.Y, hostLevel.Elevation + indentFromLevelFt);
+
+                        // создаём
+                        var rad = doc.Create.NewFamilyInstance(place, useType, hostLevel, StructuralType.NonStructural);
+
+                        // ЖЁСТКО фиксируем смещение
+                        var offsetParam =
+                            rad.get_Parameter(BuiltInParameter.INSTANCE_FREE_HOST_OFFSET_PARAM) ??
+                            rad.get_Parameter(BuiltInParameter.INSTANCE_ELEVATION_PARAM);
+
+                        if (offsetParam != null && !offsetParam.IsReadOnly)
+                        {
+                            offsetParam.Set(indentFromLevelFt);
+                        }
+
+                        // длина по экземпляру
+                        if (!byType && radiatorWidthDef != null)
+                        {
+                            var p = rad.LookupParameter(radiatorWidthDef.Name);
+                            if (p != null && !p.IsReadOnly) p.Set(targetLen);
+                        }
+
+                        // поворот
+                        OrientRadiatorFacing(doc, rad.Id, place, rad.FacingOrientation, targetFacing);
+
+                        // смещение от стены
+                        double hostWallWidth = 0;
+                        if (window.Host is Wall lw) hostWallWidth = lw.Width;
+
+                        ElementTransformUtils.MoveElement(
+                            doc,
+                            rad.Id,
+                            (hostWallWidth / 2.0 + indentFromWallFt) * targetFacing.Negate()
+                        );
                     }
-                    tg.Assimilate();
+
+                    t.Commit();
                 }
+
+                tg.Assimilate();
             }
 
             return Result.Succeeded;
         }
-        private static Level GetClosestRoomLevel(List<Level> docLvlList, Document linkDoc, FamilyInstance window)
+
+        // ================= helpers =================
+
+#if R2019 || R2020
+        private static double MmToFt(double mm)
+            => UnitUtils.ConvertToInternalUnits(mm, DisplayUnitType.DUT_MILLIMETERS);
+
+        private static double FtToMm(double ft)
+            => UnitUtils.ConvertFromInternalUnits(ft, DisplayUnitType.DUT_MILLIMETERS);
+#else
+        private static double MmToFt(double mm)
+            => UnitUtils.ConvertToInternalUnits(mm, UnitTypeId.Millimeters);
+
+        private static double FtToMm(double ft)
+            => UnitUtils.ConvertFromInternalUnits(ft, UnitTypeId.Millimeters);
+#endif
+
+        private static bool Almost(double a, double b, double tol = 1e-6) => Math.Abs(a - b) < tol;
+
+        private static double RoundUpToIncrementMmFeet(double valueFeet, double incMm)
         {
-            Level lvl = null;
-            double linkFloorLevelElevation = (linkDoc.GetElement(window.LevelId) as Level).Elevation;
-            double heightDifference = 10000000000;
-            foreach (Level docLvl in docLvlList)
+            double mm = FtToMm(valueFeet);
+            mm = Math.Ceiling(mm / incMm) * incMm;
+            return MmToFt(mm);
+        }
+
+        // Целевой фасинг строго по окну (с учётом зеркала); invert=true — развернуть наоборот
+        private static XYZ TargetFacingByWindow(FamilyInstance window, Transform t, bool invert)
+        {
+            XYZ f = t.OfVector(window.FacingOrientation);
+            if (t.HasReflection) f = f.Negate();                 // зеркальные связи
+            f = new XYZ(f.X, f.Y, 0).Normalize();                 // строго по XY
+            if (invert) f = f.Negate();                           // нужно «как у тебя» — противоположно окну
+            return f;
+        }
+
+        // знаковый угол вокруг Z ([-PI..PI])
+        private static double SignedAngleAroundZ(XYZ from, XYZ to)
+        {
+            var f = new XYZ(from.X, from.Y, 0).Normalize();
+            var t = new XYZ(to.X, to.Y, 0).Normalize();
+            double dot = Math.Max(-1.0, Math.Min(1.0, f.DotProduct(t)));
+            double ang = Math.Acos(dot);
+            double sign = Math.Sign(f.X * t.Y - f.Y * t.X);
+            return ang * sign;
+        }
+
+        // ближайший уровень хоста к уровню окна в линке (учитывает Transform)
+        private static Level GetClosestHostLevel(
+            List<Level> hostLvls,
+            Document linkDoc,
+            FamilyInstance window,
+            Transform t)
+        {
+            var lp = window.Location as LocationPoint;
+            if (lp == null || t == null || hostLvls == null || hostLvls.Count == 0)
+                return hostLvls?.FirstOrDefault();
+
+            // высота окна в системе координат хоста
+            double zHost = t.OfPoint(lp.Point).Z;
+
+            const double tol = 0.001; // ~0.3 мм
+
+            // 1) сначала ищем уровень, который <= высоты окна (то есть «этажа ниже»)
+            var belowOrEqual = hostLvls
+                .Where(l => l.Elevation <= zHost + tol)
+                .OrderByDescending(l => l.Elevation)
+                .FirstOrDefault();
+
+            if (belowOrEqual != null)
+                return belowOrEqual;
+
+            // 2) если все уровни выше (подвалы/нестандартные случаи) — берём просто ближайший
+            return hostLvls
+                .OrderBy(l => Math.Abs(l.Elevation - zHost))
+                .FirstOrDefault();
+        }
+
+        // поворот радиатора к целевому фасингу с авто-фиксом «задом наперёд»
+        private static void OrientRadiatorFacing(Document doc, ElementId id, XYZ placePoint, XYZ currentFacing, XYZ targetFacing)
+        {
+            // повернуть со знаком
+            double ang = SignedAngleAroundZ(currentFacing, targetFacing);
+            if (Math.Abs(ang) > 1e-6)
             {
-                double tmpHeightDifference = Math.Abs(Math.Round(linkFloorLevelElevation, 6) - Math.Round(docLvl.Elevation, 6));
-                if (tmpHeightDifference < heightDifference)
+                var axis = Line.CreateBound(placePoint, placePoint + XYZ.BasisZ);
+                ElementTransformUtils.RotateElement(doc, id, axis, ang);
+            }
+
+            // если всё ещё «назад» — докрутить (или FlipFacing)
+            if (doc.GetElement(id) is FamilyInstance e)
+            {
+                var now = new XYZ(e.FacingOrientation.X, e.FacingOrientation.Y, 0).Normalize();
+                var trg = new XYZ(targetFacing.X, targetFacing.Y, 0).Normalize();
+
+                if (now.DotProduct(trg) < 0)
                 {
-                    heightDifference = tmpHeightDifference;
-                    lvl = docLvl;
+                    try { e.flipFacing(); }             
+                    catch
+                    {
+                        var axis = Line.CreateBound(placePoint, placePoint + XYZ.BasisZ);
+                        ElementTransformUtils.RotateElement(doc, id, axis, Math.PI);
+                    }
                 }
             }
-            return lvl;
         }
-        private double RoundUpToIncrement(double value, double increment)
-        {
-            if (increment == 0)
-            {
-                return Math.Round(value, 6);
-            }
-            else
-            {
-                return (Math.Ceiling((value * 304.8) / increment) * increment) / 304.8;
-            }
-        }
+
+        // ================= телеметрия =================
+
         private static async Task GetPluginStartInfo()
         {
-            // Получаем сборку, в которой выполняется текущий код
             Assembly thisAssembly = Assembly.GetExecutingAssembly();
             string assemblyName = "PlaceRadiators";
             string assemblyNameRus = "Расставить радиаторы";
-            string assemblyFolderPath = Path.GetDirectoryName(thisAssembly.Location);
-
+            string assemblyFolderPath = Path.GetDirectoryName(thisAssembly.Location) ?? "";
             int lastBackslashIndex = assemblyFolderPath.LastIndexOf("\\");
             string dllPath = assemblyFolderPath.Substring(0, lastBackslashIndex + 1) + "PluginInfoCollector\\PluginInfoCollector.dll";
 
-            Assembly assembly = Assembly.LoadFrom(dllPath);
-            Type type = assembly.GetType("PluginInfoCollector.InfoCollector");
-
-            if (type != null)
+            try
             {
-                // Создание экземпляра класса
-                object instance = Activator.CreateInstance(type);
-
-                // Получение метода CollectPluginUsageAsync
-                var method = type.GetMethod("CollectPluginUsageAsync");
-
-                if (method != null)
+                Assembly assembly = Assembly.LoadFrom(dllPath);
+                Type type = assembly.GetType("PluginInfoCollector.InfoCollector");
+                if (type != null)
                 {
-                    // Вызов асинхронного метода через reflection
-                    Task task = (Task)method.Invoke(instance, new object[] { assemblyName, assemblyNameRus });
-                    await task;  // Ожидание завершения асинхронного метода
+                    object instance = Activator.CreateInstance(type);
+                    var method = type.GetMethod("CollectPluginUsageAsync");
+                    if (method != null)
+                    {
+                        Task task = (Task)method.Invoke(instance, new object[] { assemblyName, assemblyNameRus });
+                        await task;
+                    }
                 }
             }
+            catch { /* тихо игнорим */ }
         }
     }
 }
