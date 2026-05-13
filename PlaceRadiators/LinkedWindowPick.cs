@@ -9,9 +9,7 @@ namespace PlaceRadiators
 {
     class LinkedWindowPick
     {
-        public RevitLinkInstance Link { get; set; }
-        public Document LinkDoc { get; set; }
-        public FamilyInstance Window { get; set; }
-        public Transform Transform { get; set; }
+        public ElementId? LinkId { get; set; }
+        public ElementId? WindowId { get; set; }
     }
 }

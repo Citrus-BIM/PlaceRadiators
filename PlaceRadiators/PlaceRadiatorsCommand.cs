@@ -47,18 +47,15 @@ namespace PlaceRadiators
                     var li = doc.GetElement(r.ElementId) as RevitLinkInstance;
                     var ld = li?.GetLinkDocument();
                     var fi = ld?.GetElement(r.LinkedElementId) as FamilyInstance;
-                    var tr = li?.GetTotalTransform();
 
                     return new LinkedWindowPick
                     {
-                        Link = li,
-                        LinkDoc = ld,
-                        Window = fi,
-                        Transform = tr
+                        LinkId = li?.Id,
+                        WindowId = fi?.Id
                     };
                 })
-                .Where(x => x.Link != null && x.LinkDoc != null && x.Window != null && x.Transform != null)
-                .GroupBy(x => (Link: GetElementIdValue(x.Link.Id), Elem: GetElementIdValue(x.Window.Id)))
+                .Where(x => x.LinkId != null && x.WindowId != null)
+                .GroupBy(x => (Link: GetElementIdValue(x.LinkId!), Elem: GetElementIdValue(x.WindowId!)))
                 .Select(g => g.First())
                 .ToList();
             }
@@ -81,10 +78,19 @@ namespace PlaceRadiators
                 .ToList();
 
             // параметры типа ОКНА (берем из первого выбранного окна в его linkDoc)
-            var firstWindowTypeParams = picked.First().Window.Symbol.Parameters
+            var firstWindow = GetLinkedWindow(doc, picked.First(), out _, out _);
+            if (firstWindow == null)
+            {
+                TaskDialog.Show("Revit", "Выбранные окна больше недоступны. Проверьте, что связанные файлы загружены.");
+                return Result.Cancelled;
+            }
+
+            var firstWindowTypeParams = firstWindow.Symbol.Parameters
                 .Cast<Parameter>()
                 .Where(p => p.StorageType == StorageType.Double)
-                .OrderBy(p => p.Definition.Name, new AlphanumComparatorFastString())
+                .Select(p => p.Definition.Name)
+                .Distinct()
+                .OrderBy(p => p, new AlphanumComparatorFastString())
                 .ToList();
 
             // Семейства МЭО — напрямую по Family (быстро)
@@ -100,11 +106,11 @@ namespace PlaceRadiators
             dlg.ShowDialog();
             if (dlg.DialogResult != true) return Result.Cancelled;
 
-            var windowWidthParam = dlg.SelectedWindowWidthParameter; // параметр ширины окна (типовой)
+            var windowWidthParamName = dlg.SelectedWindowWidthParameter; // параметр ширины окна (типовой)
             var radiatorBaseType = dlg.SelectedRadiatorType;         // выбранный тип радиатора
-            var radiatorWidthDef = dlg.SelectedRadiatorWidthParameter;
+            var radiatorWidthParamName = dlg.SelectedRadiatorWidthParameter;
             var byType = dlg.RadiatorWidthByButtonName == "radioButton_Type";
-            var radiatorThicknessDef = dlg.SelectedRadiatorThicknessParameter;
+            var radiatorThicknessParamName = dlg.SelectedRadiatorThicknessParameter;
 
             int percent = 50;
             int.TryParse(dlg.PercentageLength, out percent);
@@ -126,12 +132,17 @@ namespace PlaceRadiators
 
                     foreach (var pick in picked)
                     {
-                        var window = pick.Window;
-                        var linkDoc = pick.LinkDoc;
-                        var transform = pick.Transform;
+                        var window = GetLinkedWindow(doc, pick, out var linkDoc, out var transform);
+                        if (window == null || linkDoc == null || transform == null) continue;
+
+                        var windowLocation = window.Location as LocationPoint;
+                        if (windowLocation == null) continue;
 
                         // длина радиатора = ширина окна (тип) * %
-                        double baseW = window.Symbol.get_Parameter(windowWidthParam.Definition).AsDouble();
+                        var windowWidthParam = GetParameterByName(window.Symbol, windowWidthParamName);
+                        if (windowWidthParam == null) continue;
+
+                        double baseW = windowWidthParam.AsDouble();
                         double targetLen = RoundUpToIncrementMmFeet(baseW * percent / 100.0, 100); // шаг 100 мм
 
                         // подбираем/создаём тип
@@ -146,11 +157,14 @@ namespace PlaceRadiators
                                 .Where(fs => fs.Family.Id == radiatorBaseType.Family.Id)
                                 .Where(fs =>
                                 {
-                                    var pT = fs.get_Parameter(radiatorThicknessDef);
-                                    var pL = fs.get_Parameter(radiatorWidthDef);
+                                    var pT = GetParameterByName(fs, radiatorThicknessParamName);
+                                    var pL = GetParameterByName(fs, radiatorWidthParamName);
                                     if (pT == null || pL == null) return false;
 
-                                    double baseT = radiatorBaseType.get_Parameter(radiatorThicknessDef).AsDouble();
+                                    var baseThicknessParam = GetParameterByName(radiatorBaseType, radiatorThicknessParamName);
+                                    if (baseThicknessParam == null) return false;
+
+                                    double baseT = baseThicknessParam.AsDouble();
                                     return Almost(pT.AsDouble(), baseT) && Almost(pL.AsDouble(), targetLen);
                                 })
                                 .FirstOrDefault();
@@ -159,7 +173,8 @@ namespace PlaceRadiators
                             {
                                 var name = $"{radiatorBaseType.Name} L={Math.Round(FtToMm(targetLen))}";
                                 useType = (FamilySymbol)radiatorBaseType.Duplicate(name);
-                                useType.get_Parameter(radiatorWidthDef).Set(targetLen);
+                                var widthParam = GetParameterByName(useType, radiatorWidthParamName);
+                                if (widthParam != null && !widthParam.IsReadOnly) widthParam.Set(targetLen);
                             }
                             else
                             {
@@ -171,10 +186,11 @@ namespace PlaceRadiators
                         {
                             useType.Activate();
                             activated.Add(useType.Id);
+                            doc.Regenerate();
                         }
 
                         // координаты окна -> в систему хоста
-                        XYZ winPtHost = transform.OfPoint((window.Location as LocationPoint).Point);
+                        XYZ winPtHost = transform.OfPoint(windowLocation.Point);
 
                         // целевой фасинг
                         bool invert = false;
@@ -187,8 +203,13 @@ namespace PlaceRadiators
                         // итоговая точка: Z = уровень + отступ
                         XYZ place = new XYZ(winPtHost.X, winPtHost.Y, hostLevel.Elevation + indentFromLevelFt);
 
+                        // ширина стены берется до создания/поворота радиатора, чтобы не держаться за устаревшие API-объекты
+                        double hostWallWidth = 0;
+                        if (window.Host is Wall lw) hostWallWidth = lw.Width;
+
                         // создаём
                         var rad = doc.Create.NewFamilyInstance(place, useType, hostLevel, StructuralType.NonStructural);
+                        var radId = rad.Id;
 
                         // ЖЁСТКО фиксируем смещение
                         var offsetParam =
@@ -201,22 +222,21 @@ namespace PlaceRadiators
                         }
 
                         // длина по экземпляру
-                        if (!byType && radiatorWidthDef != null)
+                        if (!byType && !string.IsNullOrWhiteSpace(radiatorWidthParamName))
                         {
-                            var p = rad.LookupParameter(radiatorWidthDef.Name);
+                            var p = rad.LookupParameter(radiatorWidthParamName);
                             if (p != null && !p.IsReadOnly) p.Set(targetLen);
                         }
 
                         // поворот
-                        OrientRadiatorFacing(doc, rad.Id, place, rad.FacingOrientation, targetFacing);
-
-                        // смещение от стены
-                        double hostWallWidth = 0;
-                        if (window.Host is Wall lw) hostWallWidth = lw.Width;
+                        if (doc.GetElement(radId) is FamilyInstance createdRadiator && createdRadiator.IsValidObject)
+                        {
+                            OrientRadiatorFacing(doc, radId, place, createdRadiator.FacingOrientation, targetFacing);
+                        }
 
                         ElementTransformUtils.MoveElement(
                             doc,
-                            rad.Id,
+                            radId,
                             (hostWallWidth / 2.0 + indentFromWallFt) * targetFacing.Negate()
                         );
                     }
@@ -247,6 +267,39 @@ namespace PlaceRadiators
 #endif
 
         private static bool Almost(double a, double b, double tol = 1e-6) => Math.Abs(a - b) < tol;
+
+        private static Parameter GetParameterByName(Element element, string parameterName)
+        {
+            if (element == null || string.IsNullOrWhiteSpace(parameterName)) return null;
+
+            return element.Parameters
+                .Cast<Parameter>()
+                .FirstOrDefault(p => p.Definition?.Name == parameterName);
+        }
+
+        private static FamilyInstance? GetLinkedWindow(
+            Document doc,
+            LinkedWindowPick pick,
+            out Document? linkDoc,
+            out Transform? transform)
+        {
+            linkDoc = null;
+            transform = null;
+
+            if (pick?.LinkId == null || pick.WindowId == null) return null;
+
+            var link = doc.GetElement(pick.LinkId) as RevitLinkInstance;
+            if (link == null || !link.IsValidObject) return null;
+
+            linkDoc = link.GetLinkDocument();
+            if (linkDoc == null) return null;
+
+            var window = linkDoc.GetElement(pick.WindowId) as FamilyInstance;
+            if (window == null || !window.IsValidObject) return null;
+
+            transform = link.GetTotalTransform();
+            return transform == null ? null : window;
+        }
 
         private static double RoundUpToIncrementMmFeet(double valueFeet, double incMm)
         {
