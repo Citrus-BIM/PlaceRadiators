@@ -15,6 +15,15 @@ namespace PlaceRadiators
     [Transaction(TransactionMode.Manual)]
     internal class PlaceRadiatorsCommand : IExternalCommand
     {
+        private static long GetElementIdValue(ElementId id)
+        {
+#if REVIT_2025 || REVIT_2026 || REVIT_2027
+            return id.Value;
+#else
+            return id.IntegerValue;
+#endif
+        }
+
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             try { _ = GetPluginStartInfo(); } catch { }
@@ -38,18 +47,18 @@ namespace PlaceRadiators
                     var li = doc.GetElement(r.ElementId) as RevitLinkInstance;
                     var ld = li?.GetLinkDocument();
                     var fi = ld?.GetElement(r.LinkedElementId) as FamilyInstance;
-                    var tr = li?.GetTotalTransform(); // ← добавь это
+                    var tr = li?.GetTotalTransform();
 
                     return new LinkedWindowPick
                     {
                         Link = li,
                         LinkDoc = ld,
                         Window = fi,
-                        Transform = tr      // ← и это
+                        Transform = tr
                     };
                 })
                 .Where(x => x.Link != null && x.LinkDoc != null && x.Window != null && x.Transform != null)
-                .GroupBy(x => (Link: x.Link.Id.IntegerValue, Elem: x.Window.Id.IntegerValue))
+                .GroupBy(x => (Link: GetElementIdValue(x.Link.Id), Elem: GetElementIdValue(x.Window.Id)))
                 .Select(g => g.First())
                 .ToList();
             }
@@ -82,7 +91,7 @@ namespace PlaceRadiators
             var mechanicalFamilies = new FilteredElementCollector(doc)
                 .OfClass(typeof(Family))
                 .Cast<Family>()
-                .Where(f => f.FamilyCategory?.Id.IntegerValue == (int)BuiltInCategory.OST_MechanicalEquipment)
+                .Where(f => f.FamilyCategory?.Id != null && GetElementIdValue(f.FamilyCategory.Id) == (long)BuiltInCategory.OST_MechanicalEquipment)
                 .OrderBy(f => f.Name, new AlphanumComparatorFastString())
                 .ToList();
 

@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Расставить радиаторы"
         Height="740" Width="460" MinHeight="740" MinWidth="460" MaxHeight="740" MaxWidth="460"
-        Icon="/PlaceRadiators;component/Resources/citrus.ico"
+        Icon="Resources/citrus.ico"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
         SnapsToDevicePixels="True"
@@ -22,7 +22,7 @@
     <Window.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="/PlaceRadiators;component/CitrusTheme/CitrusTheme.xaml"/>
+                <ResourceDictionary Source="CitrusTheme/CitrusTheme.xaml"/>
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Window.Resources>
@@ -60,6 +60,7 @@
                         <TextBlock Text="Параметр ширины" Margin="0,0,0,4"/>
                         <ComboBox x:Name="comboBox_WindowWidthParameter"
                                   Height="32"
+                                  MinHeight="32"
                                   VerticalContentAlignment="Center"/>
                     </StackPanel>
                 </GroupBox>
@@ -72,12 +73,14 @@
                         <TextBlock Text="Исходное семейство" Margin="0,0,0,4"/>
                         <ComboBox x:Name="comboBox_RadiatorFamilySelection"
                                   Height="32"
+                                  MinHeight="32"
                                   VerticalContentAlignment="Center"
                                   SelectionChanged="comboBox_RadiatorFamilySelection_SelectionChanged"/>
 
                         <TextBlock Text="Исходный тип" Margin="0,8,0,4"/>
                         <ComboBox x:Name="comboBox_RadiatorTypeSelection"
                                   Height="32"
+                                  MinHeight="32"
                                   VerticalContentAlignment="Center"
                                   SelectionChanged="comboBox_RadiatorTypeSelection_SelectionChanged"/>
 
@@ -101,6 +104,7 @@
                         <TextBlock Text="Параметр длины радиатора" Margin="0,10,0,4"/>
                         <ComboBox x:Name="comboBox_RadiatorWidthParameter"
                                   Height="32"
+                                  MinHeight="32"
                                   VerticalContentAlignment="Center"/>
 
                         <TextBlock x:Name="label_RadiatorThicknessParameter"
@@ -108,6 +112,7 @@
                                    Margin="0,10,0,4"/>
                         <ComboBox x:Name="comboBox_RadiatorThicknessParameter"
                                   Height="32"
+                                  MinHeight="32"
                                   VerticalContentAlignment="Center"/>
                     </StackPanel>
                 </GroupBox>
@@ -137,6 +142,7 @@
                         <TextBox x:Name="textBox_PercentageLength"
                                  Grid.Row="0" Grid.Column="1"
                                  Height="32" Text="50"
+                                 MinHeight="32"
                                  HorizontalContentAlignment="Center"
                                  VerticalContentAlignment="Center" Margin="8,0,0,0"/>
                         <TextBlock Grid.Row="0" Grid.Column="2"
@@ -149,6 +155,7 @@
                         <TextBox x:Name="textBox_IndentFromLevel"
                                  Grid.Row="2" Grid.Column="1"
                                  Height="32" Text="100"
+                                 MinHeight="32"
                                  HorizontalContentAlignment="Center"
                                  VerticalContentAlignment="Center" Margin="8,0,0,0"/>
                         <TextBlock Grid.Row="2" Grid.Column="2"
@@ -161,6 +168,7 @@
                         <TextBox x:Name="textBox_IndentFromWall"
                                  Grid.Row="4" Grid.Column="1"
                                  Height="32" Text="100"
+                                 MinHeight="32"
                                  HorizontalContentAlignment="Center"
                                  VerticalContentAlignment="Center" Margin="8,0,0,0"/>
                         <TextBlock Grid.Row="4" Grid.Column="2"

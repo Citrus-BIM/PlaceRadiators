@@ -108,6 +108,11 @@ namespace PlaceRadiators
         private void comboBox_RadiatorFamilySelection_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             Family selectedRadiatorFamily = comboBox_RadiatorFamilySelection.SelectedItem as Family;
+            if (selectedRadiatorFamily == null)
+            {
+                comboBox_RadiatorTypeSelection.ItemsSource = null;
+                return;
+            }
             List<ElementId> selectedRadiatorTypesList = selectedRadiatorFamily.GetFamilySymbolIds().ToList();
             List<FamilySymbol> radiatorTypesList = new List<FamilySymbol>();
             foreach (ElementId id in selectedRadiatorTypesList)
@@ -160,29 +165,37 @@ namespace PlaceRadiators
                 }
                 else
                 {
-                    Document famDoc = Doc.EditFamily(selectedRadiatorFamilyType.Family);
-                    if (famDoc != null)
+                    Document famDoc = null;
+                    try
                     {
-                        SelectedRadiatorDefinitionsList = new List<Definition>();
-                        FamilyManager mgr = famDoc.FamilyManager;
-                        FamilyParameterSet familyParameterSet = mgr.Parameters;
-                        foreach (FamilyParameter parameter in familyParameterSet)
+                        famDoc = Doc.EditFamily(selectedRadiatorFamilyType.Family);
+                        if (famDoc != null)
                         {
-                            if (parameter.IsInstance && parameter.StorageType == StorageType.Double)
+                            SelectedRadiatorDefinitionsList = new List<Definition>();
+                            FamilyManager mgr = famDoc.FamilyManager;
+                            FamilyParameterSet familyParameterSet = mgr.Parameters;
+                            foreach (FamilyParameter parameter in familyParameterSet)
                             {
-                                SelectedRadiatorDefinitionsList.Add(parameter.Definition);
+                                if (parameter.IsInstance && parameter.StorageType == StorageType.Double)
+                                {
+                                    SelectedRadiatorDefinitionsList.Add(parameter.Definition);
+                                }
+                            }
+
+                            SelectedRadiatorDefinitionsList = SelectedRadiatorDefinitionsList
+                                .OrderBy(p => p.Name, new AlphanumComparatorFastString()).ToList();
+
+                            comboBox_RadiatorWidthParameter.ItemsSource = SelectedRadiatorDefinitionsList;
+                            comboBox_RadiatorWidthParameter.DisplayMemberPath = "Name";
+                            if (SelectedRadiatorDefinitionsList.Count != 0)
+                            {
+                                comboBox_RadiatorWidthParameter.SelectedItem = comboBox_RadiatorWidthParameter.Items[0];
                             }
                         }
-
-                        SelectedRadiatorDefinitionsList = SelectedRadiatorDefinitionsList
-                            .OrderBy(p => p.Name, new AlphanumComparatorFastString()).ToList();
-
-                        comboBox_RadiatorWidthParameter.ItemsSource = SelectedRadiatorDefinitionsList;
-                        comboBox_RadiatorWidthParameter.DisplayMemberPath = "Name";
-                        if (SelectedRadiatorDefinitionsList.Count != 0)
-                        {
-                            comboBox_RadiatorWidthParameter.SelectedItem = comboBox_RadiatorWidthParameter.Items[0];
-                        }
+                    }
+                    finally
+                    {
+                        famDoc?.Close(false);
                     }
 
                     comboBox_RadiatorThicknessParameter.ItemsSource = null;
@@ -222,7 +235,7 @@ namespace PlaceRadiators
 
         private void btn_Ok_Click(object sender, RoutedEventArgs e)
         {
-            SaveSettings();
+            if (!SaveSettings()) return;
 
             DialogResult = true;
             Close();
@@ -236,7 +249,7 @@ namespace PlaceRadiators
         {
             if (e.Key == Key.Enter || e.Key == Key.Space)
             {
-                SaveSettings();
+                if (!SaveSettings()) return;
 
                 DialogResult = true;
                 Close();
@@ -301,29 +314,37 @@ namespace PlaceRadiators
                     FamilySymbol selectedRadiatorFamilyType = comboBox_RadiatorTypeSelection.SelectedItem as FamilySymbol;
                     if (selectedRadiatorFamilyType != null)
                     {
-                        Document famDoc = Doc.EditFamily(selectedRadiatorFamilyType.Family);
-                        if (famDoc != null)
+                        Document famDoc = null;
+                        try
                         {
-                            SelectedRadiatorDefinitionsList = new List<Definition>();
-                            FamilyManager mgr = famDoc.FamilyManager;
-                            FamilyParameterSet familyParameterSet = mgr.Parameters;
-                            foreach (FamilyParameter parameter in familyParameterSet)
+                            famDoc = Doc.EditFamily(selectedRadiatorFamilyType.Family);
+                            if (famDoc != null)
                             {
-                                if (parameter.IsInstance && parameter.StorageType == StorageType.Double)
+                                SelectedRadiatorDefinitionsList = new List<Definition>();
+                                FamilyManager mgr = famDoc.FamilyManager;
+                                FamilyParameterSet familyParameterSet = mgr.Parameters;
+                                foreach (FamilyParameter parameter in familyParameterSet)
                                 {
-                                    SelectedRadiatorDefinitionsList.Add(parameter.Definition);
+                                    if (parameter.IsInstance && parameter.StorageType == StorageType.Double)
+                                    {
+                                        SelectedRadiatorDefinitionsList.Add(parameter.Definition);
+                                    }
+                                }
+
+                                SelectedRadiatorDefinitionsList = SelectedRadiatorDefinitionsList
+                                    .OrderBy(p => p.Name, new AlphanumComparatorFastString()).ToList();
+
+                                comboBox_RadiatorWidthParameter.ItemsSource = SelectedRadiatorDefinitionsList;
+                                comboBox_RadiatorWidthParameter.DisplayMemberPath = "Name";
+                                if (SelectedRadiatorDefinitionsList.Count != 0)
+                                {
+                                    comboBox_RadiatorWidthParameter.SelectedItem = comboBox_RadiatorWidthParameter.Items[0];
                                 }
                             }
-
-                            SelectedRadiatorDefinitionsList = SelectedRadiatorDefinitionsList
-                                .OrderBy(p => p.Name, new AlphanumComparatorFastString()).ToList();
-
-                            comboBox_RadiatorWidthParameter.ItemsSource = SelectedRadiatorDefinitionsList;
-                            comboBox_RadiatorWidthParameter.DisplayMemberPath = "Name";
-                            if (SelectedRadiatorDefinitionsList.Count != 0)
-                            {
-                                comboBox_RadiatorWidthParameter.SelectedItem = comboBox_RadiatorWidthParameter.Items[0];
-                            }
+                        }
+                        finally
+                        {
+                            famDoc?.Close(false);
                         }
                     }
 
@@ -367,22 +388,34 @@ namespace PlaceRadiators
                 ? "radioButton_Type"
                 : "radioButton_Instance";
         }
-        private void SaveSettings()
+        private bool SaveSettings()
         {
             PlaceRadiatorsSettingsItem = new PlaceRadiatorsSettings();
 
             SelectedWindowWidthParameter = comboBox_WindowWidthParameter.SelectedItem as Parameter;
+            var selectedFamily = comboBox_RadiatorFamilySelection.SelectedItem as Family;
+            SelectedRadiatorType = comboBox_RadiatorTypeSelection.SelectedItem as FamilySymbol;
+            SelectedRadiatorWidthParameter = comboBox_RadiatorWidthParameter.SelectedItem as Definition;
+
+            if (SelectedWindowWidthParameter == null || selectedFamily == null || SelectedRadiatorType == null || SelectedRadiatorWidthParameter == null)
+            {
+                MessageBox.Show(
+                    "Заполните обязательные поля: параметр ширины окна, семейство и тип радиатора, параметр длины радиатора.",
+                    "Расставить радиаторы",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning
+                );
+                return false;
+            }
+
             PlaceRadiatorsSettingsItem.SelectedWindowWidthParameterName = SelectedWindowWidthParameter.Definition.Name;
 
-            PlaceRadiatorsSettingsItem.SelectedRadiatorFamilyName = (comboBox_RadiatorFamilySelection.SelectedItem as Family).Name;
-
-            SelectedRadiatorType = comboBox_RadiatorTypeSelection.SelectedItem as FamilySymbol;
+            PlaceRadiatorsSettingsItem.SelectedRadiatorFamilyName = selectedFamily.Name;
             PlaceRadiatorsSettingsItem.SelectedRadiatorTypeName = SelectedRadiatorType.Name;
 
             RadiatorWidthByButtonName = GetWidthBySelection();
             PlaceRadiatorsSettingsItem.RadiatorWidthByButtonName = RadiatorWidthByButtonName;
 
-            SelectedRadiatorWidthParameter = comboBox_RadiatorWidthParameter.SelectedItem as Definition;
             PlaceRadiatorsSettingsItem.SelectedRadiatorWidthParameterName = SelectedRadiatorWidthParameter.Name;
 
             SelectedRadiatorThicknessParameter = comboBox_RadiatorThicknessParameter.SelectedItem as Definition;
@@ -405,6 +438,7 @@ namespace PlaceRadiators
             PlaceRadiatorsSettingsItem.IndentFromWall = IndentFromWall;
 
             PlaceRadiatorsSettingsItem.SaveSettings();
+            return true;
         }
     }
 }
